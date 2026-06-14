@@ -16,50 +16,16 @@ const CONSTANTS = {
     BASE_IPTV: 'https://edusp-api.ip.tv'
 };
 
-// 1. GERADOR MANUAL PARA PESQUISAS (Exige %3A codificado)
-function buildSurveyQuery(rooms, categoryIds, nmNick) {
-    let query = '';
-    rooms.forEach(r => {
-        if (r.name) {
-            query += `&publication_target=${encodeURIComponent(r.name)}`;
-            if (nmNick) {
-                // Força o uso manual de %3A conforme Log [#57]
-                query += `&publication_target=${encodeURIComponent(r.name)}%3A${encodeURIComponent(nmNick.toLowerCase())}-sp`;
-            }
-        }
-    });
-    categoryIds.forEach(id => {
-        if (id) query += `&publication_target=${encodeURIComponent(id.toString())}`;
-    });
-    return query;
-}
-
-// 2. GERADOR MANUAL PARA TAREFAS (Exige : PURO, sem codificar)
-function buildTmsQuery(rooms, categoryIds, nmNick) {
-    let query = '';
-    rooms.forEach(r => {
-        if (r.name) {
-            query += `&publication_target=${r.name}`;
-            if (nmNick) {
-                // Mantém os dois pontos (:) PUROS conforme Log [#118]
-                query += `&publication_target=${r.name}:${nmNick.toLowerCase()}-sp`;
-            }
-        }
-    });
-    categoryIds.forEach(id => {
-        if (id) query += `&publication_target=${id.toString()}`;
-    });
-    return query;
-}
-
 app.post('/api/consulta', async (req, res) => {
     const { user, senha } = req.body;
 
-    console.log(`\n=== [BFF MATRIX V3] PROCESSANDO CODIFICAÇÃO DE ALVOS: ${user} ===`);
+    console.log(`\n======================================================`);
+    console.log(`🚀 [BFF SUPER LOGS ACTIVE] INICIANDO REQUISIÇÃO: ${user}`);
+    console.log(`======================================================`);
 
     try {
         // ----------------------------------------------------------
-        // 1. LOGIN AUTOMATIZADO (SED)
+        // 1. AUTENTICAÇÃO CENTRALIZADA (SED)
         // ----------------------------------------------------------
         const loginRes = await axios.post(`${CONSTANTS.BASE_SED}/credenciais/api/LoginCompletoToken`,
             { user, senha },
@@ -78,8 +44,8 @@ app.post('/api/consulta', async (req, res) => {
         const nomeCompletoAluno = dadosUsuario.NAME || 'Estudante';
         const raCompletoFormatado = `${cdUsuario8}${user.slice(-3)}`.toUpperCase();
         
-        // Nick do Aluno em minúsculas conforme apontado no diagnóstico
-        const nmNick = dadosUsuario.LOGIN; 
+        // Regra Oculta do Nick: Forçar estritamente em minúsculas [Log 8]
+        const nickClean = dadosUsuario.LOGIN ? dadosUsuario.LOGIN.toLowerCase() : ''; 
 
         const cookiesRecebidos = loginRes.headers['set-cookie'] || [];
         const cookiesFiltrados = cookiesRecebidos.map(cookie => cookie.split(';')[0]).join('; ');
@@ -97,7 +63,7 @@ app.post('/api/consulta', async (req, res) => {
         };
 
         // ----------------------------------------------------------
-        // 2. BUSCA DO CALENDÁRIO / BIMESTRE (SED)
+        // 2. EXTRAÇÃO DA DATA DE INÍCIO DO BIMESTRE (SED)
         // ----------------------------------------------------------
         let infoTurma = {};
         let schoolId = null;
@@ -109,7 +75,7 @@ app.post('/api/consulta', async (req, res) => {
             if (Array.isArray(turmaRes.data) && turmaRes.data.length > 0) infoTurma = turmaRes.data[0];
             else if (turmaRes.data?.data) infoTurma = Array.isArray(turmaRes.data.data) ? turmaRes.data.data[0] : turmaRes.data.data;
             schoolId = infoTurma?.CodigoEscola || infoTurma?.CD_ESCOLA;
-        } catch (err) { console.error(`[BFF] Erro Turma: ${err.message}`); }
+        } catch (err) { console.error(`[BFF] Erro ao buscar turma: ${err.message}`); }
 
         let dataInicioBimestre = new Date("2026-04-23T00:00:00Z"); 
         if (schoolId) {
@@ -122,11 +88,11 @@ app.post('/api/consulta', async (req, res) => {
                         dataInicioBimestre = new Date(bAtivo.DataInicio);
                     }
                 }
-            } catch (errBim) { console.error(`[BFF] Erro Calendário: ${errBim.message}`); }
+            } catch (errBim) { console.error(`[BFF] Erro ao buscar calendário: ${errBim.message}`); }
         }
 
         // ----------------------------------------------------------
-        // 3. AUTENTICAÇÃO TOKEN IP.TV
+        // 3. HANDSHAKE IP.TV (CONQUISTA DE CREDENCIAIS)
         // ----------------------------------------------------------
         let authTokenIptv = null;
         try {
@@ -138,7 +104,7 @@ app.post('/api/consulta', async (req, res) => {
         } catch (err) { console.error(`[BFF] Erro Handshake IP.TV: ${err.message}`); }
 
         // ----------------------------------------------------------
-        // 4. CHAMADAS COM STRINGS BRUTAS (ANTI-MUTACAO DO AXIOS)
+        // 4. EXTRAÇÃO DE SALAS E PROCESSAMENTO DA ESTRUTURA CRONOLÓGICA
         // ----------------------------------------------------------
         let pendentes = 0;
         let expiradas = 0;
@@ -146,34 +112,86 @@ app.post('/api/consulta', async (req, res) => {
         let redacoes = 0;
 
         if (authTokenIptv) {
-            try {
-                // Inclusão dos headers complementares exigidos pelo gateway
-                const configIptvBase = {
-                    httpsAgent,
-                    headers: { 
-                        'x-api-key': authTokenIptv, 
-                        'Host': 'edusp',
-                        'x-api-realm': 'edusp',
-                        'x-api-platform': 'webclient',
-                        'Accept': 'application/json',
-                        'User-Agent': 'Mozilla/5.0'
+            // Configuração base de cabeçalhos obrigatórios do Virtual Host
+            const configIptvBase = {
+                httpsAgent,
+                headers: { 
+                    'x-api-key': authTokenIptv, 
+                    'Host': 'edusp',
+                    'x-api-realm': 'edusp',
+                    'x-api-platform': 'webclient',
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0'
+                }
+            };
+
+            // Puxar salas para alimentar os geradores ordenados
+            const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
+            const rooms = roomsRes.data?.rooms || [];
+            const allCategories = [...new Set(rooms.flatMap(r => r.category_ids || []))];
+
+            // --- MONTAGEM DA QUERY DE PESQUISAS (Targets no INÍCIO com ?&) [Log 57] ---
+            const surveyTargets = [];
+            rooms.forEach(r => {
+                if (r.name) {
+                    surveyTargets.push(`publication_target=${encodeURIComponent(r.name)}`);
+                    if (nickClean) {
+                        // %3A Codificado obrigatoriamente para as Pesquisas
+                        surveyTargets.push(`publication_target=${encodeURIComponent(r.name)}%3A${nickClean}-sp`);
                     }
-                };
+                }
+            });
+            allCategories.forEach(id => {
+                if (id) surveyTargets.push(`publication_target=${id}`);
+            });
+            const urlSurvey = `${CONSTANTS.BASE_IPTV}/survey/todo/count?&${surveyTargets.join('&')}&filter_expired=true&with_answer=true&answer_statuses=draft`;
 
-                const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
-                const rooms = roomsRes.data?.rooms || [];
-                const allCategories = [...new Set(rooms.flatMap(r => r.category_ids || []))];
-                
-                // Geração das caudas de parâmetros customizadas para cada endpoint
-                const surveyQueryString = buildSurveyQuery(rooms, allCategories, nmNick);
-                const tmsQueryString = buildTmsQuery(rooms, allCategories, nmNick);
 
-                // Montagem literal das URLs para blindar os dois pontos (:)
-                const urlSurvey = `${CONSTANTS.BASE_IPTV}/survey/todo/count?${surveyQueryString}&filter_expired=true&with_answer=true&answer_statuses=draft`;
-                const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false${tmsQueryString}&answer_statuses=draft&with_apply_moment=true`;
-                const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?expired_only=true&limit=100&offset=0&filter_expired=false&is_exam=false&with_answer=true&is_essay=false${tmsQueryString}&answer_statuses=draft&with_apply_moment=true`;
-                const urlRedacoes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${tmsQueryString}&is_essay=true&filter_expired=true&with_answer=true`;
+            // --- MONTAGEM DA QUERY DE TAREFAS PENDENTES (Targets no MEIO com ?) [Log 120] ---
+            const tmsFixedStartPendentes = "expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false";
+            const tmsTargetsPendentes = [];
+            rooms.forEach(r => {
+                if (r.name) {
+                    tmsTargetsPendentes.push(`publication_target=${r.name}`);
+                    if (nickClean) {
+                        // Dois pontos (:) PURO e sem codificação para o TMS
+                        tmsTargetsPendentes.push(`publication_target=${r.name}:${nickClean}-sp`);
+                    }
+                }
+            });
+            allCategories.forEach(id => {
+                if (id) tmsTargetsPendentes.push(`publication_target=${id}`);
+            });
+            const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${tmsFixedStartPendentes}&${tmsTargetsPendentes.join('&')}&answer_statuses=draft&with_apply_moment=true`;
 
+
+            // --- MONTAGEM DA QUERY DE TAREFAS EXPIRADAS (Targets no MEIO com ?) [Log 123] ---
+            const tmsFixedStartExpiradas = "expired_only=true&limit=100&offset=0&filter_expired=false&is_exam=false&with_answer=true&is_essay=false";
+            const tmsTargetsExpiradas = [];
+            rooms.forEach(r => {
+                if (r.name) {
+                    tmsTargetsExpiradas.push(`publication_target=${r.name}`);
+                    if (nickClean) {
+                        tmsTargetsExpiradas.push(`publication_target=${r.name}:${nickClean}-sp`);
+                    }
+                }
+            });
+            allCategories.forEach(id => {
+                if (id) tmsTargetsExpiradas.push(`publication_target=${id}`);
+            });
+            const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${tmsFixedStartExpiradas}&${tmsTargetsExpiradas.join('&')}&answer_statuses=draft&with_apply_moment=true`;
+
+
+            // --- MONTAGEM DA QUERY DE REDAÇÕES PENDENTES ---
+            const urlRedacoes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${tmsTargetsPendentes.join('&')}&is_essay=true&filter_expired=true&with_answer=true`;
+
+            // EXECUÇÃO DA TÉCNICA DOS SUPER LOGS NO CONSOLE DO RENDER
+            console.log(`\n🔗 [SUPER LOG] URL SURVEY: ${urlSurvey}\n`);
+            console.log(`🔗 [SUPER LOG] URL PENDENTES: ${urlPendentes}\n`);
+            console.log(`🔗 [SUPER LOG] URL EXPIRADAS: ${urlExpiradas}\n`);
+
+            // Execução paralela controlada
+            try {
                 const [surveyRes, pendentesRaw, expiradasRaw, redacoesRaw] = await Promise.all([
                     axios.get(urlSurvey, configIptvBase),
                     axios.get(urlPendentes, configIptvBase),
@@ -182,7 +200,7 @@ app.post('/api/consulta', async (req, res) => {
                 ]);
 
                 // ----------------------------------------------------------
-                // 5. PROCESSAMENTO FILTRADO DE RESULTADOS
+                // 5. FILTRAGEM CIRÚRGICA DE DADOS (CORTES TEMPORAIS)
                 // ----------------------------------------------------------
                 const rawPendentesList = Array.isArray(pendentesRaw.data) ? pendentesRaw.data : (pendentesRaw.data?.data || []);
                 pendentes = rawPendentesList.filter(t =>
@@ -202,11 +220,14 @@ app.post('/api/consulta', async (req, res) => {
                 avaliacoes = surveyRes.data?.count || surveyRes.data?.required_count || 0;
 
             } catch (errBatch) {
-                console.error(`[BFF CRITICAL] Falha na matriz de endpoints IP.TV:`, errBatch.response?.status || errBatch.message);
+                console.error(`❌ [SUPER LOG DETECTED ERROR] Falha na requisição Axios:`, errBatch.response?.status || errBatch.message);
+                console.error(`❌ URL que gerou a falha:`, errBatch.config?.url);
             }
         }
 
-        // Retorno Limpo Estruturado
+        // ----------------------------------------------------------
+        // RETORNO HIGIENIZADO E COMPATÍVEL
+        // ----------------------------------------------------------
         res.json({
             aluno: {
                 nome: nomeCompletoAluno,
@@ -214,7 +235,7 @@ app.post('/api/consulta', async (req, res) => {
                 escola: infoTurma.NomeEscola || 'Não Informada',
                 turma: infoTurma.DescricaoTurma || 'Não Informada'
             },
-            indicators: {
+            indicadores: {
                 pendentes: pendentes,
                 expiradas: expiradas,
                 avaliacoes: avaliacoes,
@@ -223,10 +244,10 @@ app.post('/api/consulta', async (req, res) => {
         });
 
     } catch (error) {
-        console.error(`[BFF] Erro Geral: ${error.message}`);
-        res.status(500).json({ error: "Falha geral de agregação no barramento principal do BFF." });
+        console.error(`[BFF CRITICAL GLOBAL ERROR]: ${error.message}`);
+        res.status(500).json({ error: "Falha geral no ecossistema do BFF." });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF Matrix V3 (Estrito) ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF Super Logs ativo na porta ${PORT}`));
