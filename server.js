@@ -19,8 +19,13 @@ const CONSTANTS = {
 app.post('/api/consulta', async (req, res) => {
     const { user, senha } = req.body;
 
+    console.log(`\n=== [DEBUG] NOVA REQUISIÇÃO RECEBIDA PARA O RA: ${user} ===`);
+
     try {
+        // ----------------------------------------------------------
         // 1. LOGIN SED
+        // ----------------------------------------------------------
+        console.log("[DEBUG] [PASSO 1] Tentando Autenticação na SED...");
         const loginRes = await axios.post(`${CONSTANTS.BASE_SED}/credenciais/api/LoginCompletoToken`,
             { user, senha },
             { headers: {
@@ -32,14 +37,21 @@ app.post('/api/consulta', async (req, res) => {
         );
 
         const tokenSed = loginRes.data.token;
-        const cdUsuario9 = loginRes.data.DadosUsuario.CD_USUARIO.toString();
-        const cdUsuario8 = cdUsuario9.substring(0, 8);
+        const cdUsuario9 = loginRes.data.DadosUsuario?.CD_USUARIO?.toString();
+        
+        if (!tokenSed) {
+            console.error("[DEBUG] [ERRO CRÍTICO] Objeto de login bem-sucedido, mas campo 'token' veio vazio!");
+            return res.status(401).json({ error: "Token não retornado pela SED." });
+        }
 
-        console.log(`[BFF] Token Recebido. Iniciando consultas para Aluno: ${cdUsuario8}`);
+        const cdUsuario8 = cdUsuario9 ? cdUsuario9.substring(0, 8) : '';
+        console.log(`[DEBUG] Login OK. Aluno 9D: ${cdUsuario9} | Aluno Truncado 8D: ${cdUsuario8}`);
+        console.log(`[DEBUG] Tamanho do Token SED Recebido: ${tokenSed.length} caracteres.`);
+        console.log(`[DEBUG] Primeiros 30 caracteres do Token: "${tokenSed.substring(0, 30)}..."`);
 
-        // Configuração global de segurança para as chamadas da SED
+        // Configuração de Headers Estritos para a SED
         const sedConfig = {
-            maxRedirects: 0, // CRÍTICO: Impede o Axios de perder o Bearer token em redirecionamentos do APIM Azure
+            maxRedirects: 0,
             validateStatus: (status) => status >= 200 && status < 400,
             headers: {
                 'Authorization': `Bearer ${tokenSed}`,
@@ -53,73 +65,96 @@ app.post('/api/consulta', async (req, res) => {
             }
         };
 
+        // ----------------------------------------------------------
         // 2. BUSCAR TURMA
+        // ----------------------------------------------------------
         let infoTurma = {};
         let escolaId = 0;
+        const urlTurma = `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${cdUsuario8}`;
+        console.log(`[DEBUG] [PASSO 2] Chamando rota de Turma: ${urlTurma}`);
+        
         try {
-            const turmaRes = await axios.get(
-                `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${cdUsuario8}`, 
-                sedConfig
-            );
+            const turmaRes = await axios.get(urlTurma, sedConfig);
             infoTurma = Array.isArray(turmaRes.data) ? turmaRes.data[0] : (turmaRes.data.data || {});
             escolaId = infoTurma.CodigoEscola || 0;
+            console.log(`[DEBUG] Sucesso na Rota de Turma! Escola detectada: ${escolaId}`);
         } catch (errTurma) {
-            console.error("Erro controlado na rota #3 (Turma):", errTurma.response?.status || errTurma.message);
-            // Se o Azure retornou redirect (302) interceptamos a URL destino manualmente
+            console.error(`[DEBUG] [FALHA ROTA TURMA] Status: ${errTurma.response?.status}`);
+            console.error(`[DEBUG] Headers de Resposta do Erro da Turma:`, JSON.stringify(errTurma.response?.headers || {}));
+            console.error(`[DEBUG] Corpo do Erro da Turma da SED:`, JSON.stringify(errTurma.response?.data || errTurma.message));
+            
             if (errTurma.response?.status === 302 && errTurma.response.headers.location) {
-                const redirectUrl = errTurma.response.headers.location;
-                const retryRes = await axios.get(redirectUrl, sedConfig);
-                infoTurma = Array.isArray(retryRes.data) ? retryRes.data[0] : (retryRes.data.data || {});
-                escolaId = infoTurma.CodigoEscola || 0;
+                console.log(`[DEBUG] Detectado redirecionamento 302 para: ${errTurma.response.headers.location}`);
             }
         }
 
+        // ----------------------------------------------------------
         // 3. HANDSHAKE IP.TV
-        const iptvHandshake = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
-            { token: tokenSed },
-            {
-                httpsAgent,
-                headers: {
-                    'Host': 'edusp',
-                    'x-api-realm': 'edusp',
-                    'x-api-platform': 'webclient',
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        // ----------------------------------------------------------
+        let authTokenIptv = null;
+        console.log("[DEBUG] [PASSO 3] Iniciando Handshake com a IP.TV...");
+        try {
+            const iptvHandshake = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
+                { token: tokenSed },
+                {
+                    httpsAgent,
+                    headers: {
+                        'Host': 'edusp',
+                        'x-api-realm': 'edusp',
+                        'x-api-platform': 'webclient',
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
                 }
-            }
-        );
+            );
+            authTokenIptv = iptvHandshake.data?.auth_token;
+            console.log(`[DEBUG] Handshake IP.TV efetuado com sucesso! Token gerado: ${authTokenIptv ? 'SIM' : 'NÃO'}`);
+        } catch (errIptv) {
+            console.error(`[DEBUG] [FALHA HANDSHAKE IP.TV] Status: ${errIptv.response?.status}`);
+            console.error(`[DEBUG] Resposta de Erro da IP.TV:`, JSON.stringify(errIptv.response?.data || errIptv.message));
+        }
 
-        const authTokenIptv = iptvHandshake.data.auth_token;
-
+        // ----------------------------------------------------------
         // 4. BUSCAR AVALIAÇÕES
+        // ----------------------------------------------------------
         let totalAvaliacoes = 0;
+        console.log("[DEBUG] [PASSO 4] Buscando Avaliações na SED...");
         try {
             const avalRes = await axios.get(`${CONSTANTS.BASE_SED}/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${cdUsuario8}&AnoLetivo=2026`, sedConfig);
             const listaAvaliacoes = Array.isArray(avalRes.data) ? avalRes.data : (avalRes.data.data || []);
             totalAvaliacoes = listaAvaliacoes.length;
+            console.log(`[DEBUG] Avaliações processadas. Total: ${totalAvaliacoes}`);
         } catch (errAval) {
-            console.error("Erro na rota de avaliações:", errAval.response?.status || errAval.message);
+            console.error(`[DEBUG] [FALHA AVALIAÇÕES] Status: ${errAval.response?.status}. Mensagem: ${errAval.message}`);
         }
 
+        // ----------------------------------------------------------
         // 5. BUSCAR TAREFAS NA IP.TV
+        // ----------------------------------------------------------
         let tarefasPendentes = 0;
         let tarefasExpiradas = 0;
-        try {
-            const tasksRes = await axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo/count?filter_expired=true&publication_target=vialv`, {
-                httpsAgent,
-                headers: { 
-                    'x-api-key': authTokenIptv, 
-                    'Host': 'edusp',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            });
-            tarefasPendentes = tasksRes.data.todo || 0;
-            tarefasExpiradas = tasksRes.data.expired || 0;
-        } catch (errTasks) {
-            console.error("Erro na rota de tarefas IPTV:", errTasks.response?.status || errTasks.message);
+        if (authTokenIptv) {
+            console.log("[DEBUG] [PASSO 5] Buscando contagem de tarefas na IP.TV...");
+            try {
+                const tasksRes = await axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo/count?filter_expired=true&publication_target=vialv`, {
+                    httpsAgent,
+                    headers: { 
+                        'x-api-key': authTokenIptv, 
+                        'Host': 'edusp',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    }
+                });
+                tarefasPendentes = tasksRes.data?.todo || 0;
+                tarefasExpiradas = tasksRes.data?.expired || 0;
+                console.log(`[DEBUG] Tarefas lidas da IP.TV -> Pendentes: ${tarefasPendentes} | Expiradas: ${tarefasExpiradas}`);
+            } catch (errTasks) {
+                console.error(`[DEBUG] [FALHA CONTAGEM TAREFAS] Status: ${errTasks.response?.status}. Mensagem: ${errTasks.message}`);
+            }
+        } else {
+            console.log("[DEBUG] [PASSO 5] Ignorado: Sem Token IP.TV ativo.");
         }
 
-        // RETORNO ESTRUTURADO
+        // Retorno padrão estruturado para não quebrar o dashboard
         res.json({
             aluno: {
                 codigo: cdUsuario8,
@@ -135,13 +170,19 @@ app.post('/api/consulta', async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Erro Crítico no Fluxo BFF:", error.response ? error.response.status : error.message);
+        console.error(`\n[DEBUG] [ERRO CRÍTICO NO BARRAMENTO PRINCIPAL]`);
+        console.error(`Mensagem: ${error.message}`);
+        if (error.response) {
+            console.error(`Status HTTP: ${error.response.status}`);
+            console.error(`Dados retornados do erro global:`, JSON.stringify(error.response.data));
+        }
+        
         res.status(error.response ? error.response.status : 500).json({
-            error: "Falha na validação de segurança da infraestrutura de dados.",
-            details: error.response ? error.response.data : error.message
+            error: "Falha interna no barramento sob rastreamento.",
+            details: error.message
         });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF com persistência de Header ativa na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF em modo Monitoramento Ativo rodando na porta ${PORT}`));
