@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 
-const app = report = express();
+const app = express();
 app.use(express.json());
 app.use(cors());
 
@@ -10,7 +10,7 @@ app.post('/api/consulta', async (req, res) => {
     const { user, senha } = req.body;
 
     if (!user || !senha) {
-        return res.status(400).json({ error: 'RA e senha são obrigatórios.' });
+        return res.status(400).json({ error: 'RA e senha are obrigatórios.' });
     }
 
     try {
@@ -20,7 +20,7 @@ app.post('/api/consulta', async (req, res) => {
         };
 
         // ==========================================================
-        // [#2] LOGIN SED - AUTENTICAÇÃO PRIMÁRIA
+        // [LOG #2] LOGIN SED - AUTENTICAÇÃO PRIMÁRIA
         // ==========================================================
         const loginResponse = await axios.post(
             'https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/credenciais/api/LoginCompletoToken',
@@ -35,29 +35,50 @@ app.post('/api/consulta', async (req, res) => {
             }
         );
 
-        const tokenLongoSED = loginResponse.data.token;
+        let tokenLongoSED = loginResponse.data.token;
         const dadosUsuario = loginResponse.data.DadosUsuario;
 
         if (!tokenLongoSED || !dadosUsuario || !dadosUsuario.CD_USUARIO) {
             return res.status(401).json({ error: 'Falha na leitura dos dados de autenticação da SED.' });
         }
 
-        // CAPTURA DO ID ORIGINAL (9 dígitos)
-        const codigoAlunoOriginal = dadosUsuario.CD_USUARIO.toString(); 
+        // Sanitização e formatação do token
+        tokenLongoSED = tokenLongoSED.toString().trim().replace(/[\r\n]/g, "");
+        const tokenFormatado = tokenLongoSED.startsWith('Bearer') ? tokenLongoSED : `Bearer ${tokenLongoSED}`;
 
-        // O PULO DO GATO: Remove o último dígito conforme o log oficial (Trunca para 8 dígitos)
-        const codigoAlunoTruncado = codigoAlunoOriginal.slice(0, -1);
+        // Definição dos IDs dinâmicos (9 dígitos e truncado para 8 dígitos)
+        const codigoAluno9Digitos = dadosUsuario.CD_USUARIO.toString().trim(); 
+        const codigoAluno8Digitos = codigoAluno9Digitos.slice(0, -1);
 
-        console.log(`[BFF] ID Original: ${codigoAlunoOriginal} | ID Truncado para Consultas: ${codigoAlunoTruncated = codigoAlunoTruncado}`);
+        console.log(`[BFF] Sessão Iniciada -> Aluno 9D: ${codigoAluno9Digitos} | Aluno 8D: ${codigoAluno8Digitos}`);
 
-        // Montagem exata do Header de Autorização exigido pela SED
+        // Headers padrão para as comunicações com a SED
         const sedAuthHeaders = {
             ...browserHeaders,
             'Ocp-Apim-Subscription-Key': 'd701a2043aa24d7ebb37e9adf60d043b',
             'X-Product-Name': 'SalaDoFuturo',
-            'Authorization': `Bearer ${tokenLongoSED}` // Prefixo puro + espaço + token longo
+            'Authorization': tokenFormatado
         };
 
+        // ==========================================================
+        // [LOG #10] REGISTRO DE TOKEN CMSP - DESBLOQUEIA AS CONSULTAS
+        // ==========================================================
+        try {
+            await axios.post(
+                'https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/cmspwebservice/api/sala-do-futuro-alunos/registrar-usuario-token',
+                {
+                    userId: codigoAluno9Digitos, // Usa obrigatoriamente os 9 dígitos aqui
+                    deviceToken: "",
+                    typeDeviceToken: "DESKTOP"
+                },
+                { headers: sedAuthHeaders }
+            );
+            console.log('[BFF] Token registrado com sucesso no barramento CMSP.');
+        } catch (e) {
+            console.warn('Aviso: Falha ou ignorado no registro CMSP:', e.message);
+        }
+
+        // Inicialização de variáveis de retorno
         let infoEscola = {};
         let escolaId = 0;
         let tarefasPendentes = 0;
@@ -65,11 +86,11 @@ app.post('/api/consulta', async (req, res) => {
         let totalAvaliacoes = 0;
 
         // ==========================================================
-        // [#3] CONSULTA DE TURMA (SED) - Usando o ID de 8 dígitos
+        // [LOG #3] CONSULTA DE TURMA (SED) - ID de 8 Dígitos
         // ==========================================================
         try {
             const dadosEscolares = await axios.get(
-                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAlunoTruncado}`, 
+                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno8Digitos}`, 
                 { headers: sedAuthHeaders }
             );
             if (dadosEscolares.data && dadosEscolares.data[0]) {
@@ -81,7 +102,7 @@ app.post('/api/consulta', async (req, res) => {
         }
 
         // ==========================================================
-        // [#4] CONSULTA DE BIMESTRES (SED)
+        // [LOG #4] CONSULTA DE BIMESTRES (SED) - ID de Escola Dinâmico
         // ==========================================================
         try {
             if (escolaId > 0) {
@@ -95,7 +116,7 @@ app.post('/api/consulta', async (req, res) => {
         }
 
         // ==========================================================
-        // [#5] HANDSHAKE IP.TV e TAREFAS
+        // [LOG #5] HANDSHAKE E TAREFAS (IP.TV)
         // ==========================================================
         try {
             const iptvTokenResponse = await axios.post(
@@ -103,6 +124,7 @@ app.post('/api/consulta', async (req, res) => {
                 { token: tokenLongoSED }, 
                 {
                     headers: {
+                        'Host': 'edusp',
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'application/json',
                         'Content-Type': 'application/json',
@@ -118,6 +140,7 @@ app.post('/api/consulta', async (req, res) => {
 
             if (auth_token_iptv) {
                 const iptvDataHeaders = {
+                    'Host': 'edusp',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept': 'application/json',
                     'x-api-key': auth_token_iptv 
@@ -131,28 +154,28 @@ app.post('/api/consulta', async (req, res) => {
                 tarefasExpiradas = pendenciasResponse.data.expired || 0;
             }
         } catch (e) {
-            console.error('Erro na IP.TV:', e.response?.data || e.message);
+            console.error('Erro na integração IP.TV:', e.response?.data || e.message);
         }
 
         // ==========================================================
-        // [#26] CONSULTA DE AVALIAÇÕES (SED) - Usando o ID de 8 dígitos
+        // [LOG #28] CONSULTA DE AVALIAÇÕES (SED) - ID de 8 Dígitos
         // ==========================================================
         try {
             const avaliacoesResponse = await axios.get(
-                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${codigoAlunoTruncado}&AnoLetivo=2026`, 
+                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${codigoAluno8Digitos}&AnoLetivo=2026`, 
                 { headers: sedAuthHeaders }
             );
             if (Array.isArray(avaliacoesResponse.data)) {
                 totalAvaliacoes = avaliacoesResponse.data.length;
             }
         } catch (e) {
-            console.error('Erro na rota #26 (Avaliações):', e.response?.data || e.message);
+            console.error('Erro na rota #28 (Avaliações):', e.response?.data || e.message);
         }
 
-        // Devolve os dados consolidados e corrigidos
+        // Envia o JSON final limpo com as informações reais capturadas
         res.json({
             aluno: {
-                codigo: codigoAlunoTruncado,
+                codigo: codigoAluno8Digitos,
                 escola: infoEscola.NomeEscola || 'Não Informada',
                 turma: infoEscola.DescricaoTurma || 'Não Informada'
             },
@@ -165,10 +188,10 @@ app.post('/api/consulta', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Erro crítico no barramento principal:', error.message);
+        console.error('Erro geral no barramento principal:', error.message);
         res.status(500).json({ error: 'Erro ao processar dados no servidor administrativo.' });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF operando com ID de 8 dígitos na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF Arquitetura CMSP ativa na porta ${PORT}`));
