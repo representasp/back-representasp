@@ -19,11 +19,11 @@ const CONSTANTS = {
 app.post('/api/consulta', async (req, res) => {
     const { user, senha } = req.body;
 
-    console.log(`\n=== [BFF MATRIZ DEFINITIVA] SINCRONIZANDO CONTA: ${user} ===`);
+    console.log(`\n=== [BFF PRODUÇÃO CONSOLIDADO] IMPLANTANDO FILTROS ESTRICTOS: ${user} ===`);
 
     try {
         // ----------------------------------------------------------
-        // 1. LOGIN SED
+        // 1. AUTENTICAÇÃO CENTRALIZADA (SED)
         // ----------------------------------------------------------
         const loginRes = await axios.post(`${CONSTANTS.BASE_SED}/credenciais/api/LoginCompletoToken`,
             { user, senha },
@@ -58,7 +58,7 @@ app.post('/api/consulta', async (req, res) => {
         };
 
         // ----------------------------------------------------------
-        // 2. BUSCAR TURMA E COLETAR ID DA ESCOLA [LOG #4]
+        // 2. EXTRAÇÃO DE ESCOLA E CALENDÁRIO (SED)
         // ----------------------------------------------------------
         let infoTurma = {};
         let schoolId = null;
@@ -70,12 +70,10 @@ app.post('/api/consulta', async (req, res) => {
             if (Array.isArray(turmaRes.data) && turmaRes.data.length > 0) infoTurma = turmaRes.data[0];
             else if (turmaRes.data?.data) infoTurma = Array.isArray(turmaRes.data.data) ? turmaRes.data.data[0] : turmaRes.data.data;
             schoolId = infoTurma?.CodigoEscola || infoTurma?.CD_ESCOLA;
-        } catch (err) { console.error(`[BFF] Erro Turma: ${err.message}`); }
+        } catch (err) { console.error(`[BFF] Erro ao recuperar turma: ${err.message}`); }
 
-        // ----------------------------------------------------------
-        // 3. ANCORAGEM DE TEMPO DO BIMESTRE CORRENTE [LOG #4]
-        // ----------------------------------------------------------
-        let dataInicioBimestre = new Date("2026-04-22T00:00:00.000Z"); 
+        // Ancoragem temporal dinâmica do 2º Bimestre obtida via logs do NotebookLM
+        let dataInicioBimestre = new Date("2026-04-23T00:00:00Z"); 
         if (schoolId) {
             try {
                 const bimestreRes = await axios.get(`${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Bimestre/ListarBimestres?escolaId=${schoolId}`, sedConfig);
@@ -86,47 +84,34 @@ app.post('/api/consulta', async (req, res) => {
                         dataInicioBimestre = new Date(bAtivo.DataInicio);
                     }
                 }
-            } catch (errBim) { console.error(`[BFF] Erro Calendário: ${errBim.message}`); }
+            } catch (errBim) { console.error(`[BFF] Erro ao buscar calendário: ${errBim.message}`); }
         }
 
         // ----------------------------------------------------------
-        // 4. HANDSHAKE PROTOCOLO IP.TV
+        // 3. HANDSHAKE IP.TV
         // ----------------------------------------------------------
         let authTokenIptv = null;
         try {
             const iptvHandshake = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
                 { token: tokenSed },
-                {
-                    httpsAgent,
-                    headers: {
-                        'x-api-realm': 'edusp',
-                        'x-api-platform': 'webclient',
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json',
-                        'User-Agent': 'Mozilla/5.0'
-                    }
-                }
+                { httpsAgent, headers: { 'x-api-realm': 'edusp', 'x-api-platform': 'webclient', 'Content-Type': 'application/json' }}
             );
             authTokenIptv = iptvHandshake.data?.auth_token;
-        } catch (err) { console.error(`[BFF] Erro Handshake: ${err.message}`); }
+        } catch (err) { console.error(`[BFF] Erro Handshake IPTV: ${err.message}`); }
 
         // ----------------------------------------------------------
-        // 5. PROCESSAMENTO DOS NOVOS CONTADORES EXATOS (IP.TV)
+        // 4. PARALELISMO TÉCNICO DE ROTAS E FILTRAGEM (IP.TV)
         // ----------------------------------------------------------
-        let countPendentes = 0;
-        let countExpiradas = 0;
-        let countAvaliacoes = 0; 
-        let countRedacoes = 0;
+        let pendentes = 0;
+        let expiradas = 0;
+        let avaliacoes = 0;
+        let redacoes = 0;
 
         if (authTokenIptv) {
             try {
                 const configIptvBase = {
                     httpsAgent,
-                    headers: { 
-                        'x-api-key': authTokenIptv, 
-                        'Accept': 'application/json',
-                        'User-Agent': 'Mozilla/5.0'
-                    }
+                    headers: { 'x-api-key': authTokenIptv, 'Host': 'edusp', 'Accept': 'application/json' }
                 };
 
                 const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
@@ -143,46 +128,38 @@ app.post('/api/consulta', async (req, res) => {
                 if (targets.length === 0) targets.push('publication_target=all');
                 const targetQuery = targets.join('&');
 
-                // A. CORREÇÃO DAS PESQUISAS [LOG #23]
-                try {
-                    const surveyRes = await axios.get(`${CONSTANTS.BASE_IPTV}/survey/todo/count?${targetQuery}&filter_expired=true&with_answer=true&answer_statuses=draft`, configIptvBase);
-                    countAvaliacoes = surveyRes.data?.count || surveyRes.data?.required_count || 0;
-                } catch (eSurv) { console.error(`[BFF] Erro /survey/todo/count: ${eSurv.message}`); }
+                // Execução paralela em lote (Flow idêntico ao Diagnosticado pelo NotebookLM)
+                const [pendentesRaw, expiradasRaw, redacoesRaw, surveyRes] = await Promise.all([
+                    axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=false&filter_expired=true&is_exam=false&is_essay=false&with_answer=true&answer_statuses=draft&answer_statuses=pending`, configIptvBase),
+                    axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=true&filter_expired=false&is_exam=false&is_essay=false&with_answer=true&answer_statuses=draft&answer_statuses=pending`, configIptvBase),
+                    axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&is_essay=true&filter_expired=true&with_answer=true`, configIptvBase),
+                    axios.get(`${CONSTANTS.BASE_IPTV}/survey/todo/count?${targetQuery}&filter_expired=true&with_answer=true&answer_statuses=draft`, configIptvBase)
+                ]);
 
-                // B. TAREFAS PENDENTES [LOG #35]
-                try {
-                    const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=false&filter_expired=true&is_exam=false&is_essay=false&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
-                    const pendentesRes = await axios.get(urlPendentes, configIptvBase);
-                    const rawPendentes = Array.isArray(pendentesRes.data) ? pendentesRes.data : (pendentesRes.data?.data || []);
-                    
-                    countPendentes = rawPendentes.filter(t => 
-                        (t.answer_id === null || !t.answer_id) && 
-                        new Date(t.publish_at || t.start_date) >= dataInicioBimestre
-                    ).length;
-                } catch (ePend) { console.error(`[BFF] Erro Pendentes: ${ePend.message}`); }
+                // Aplicação das regras de corte estritas por answer_id e Linha Temporal do Bimestre
+                pendentes = (pendentesRaw.data || []).filter(t =>
+                    t.answer_id === null && new Date(t.publish_at || t.start_date) >= dataInicioBimestre
+                ).length;
 
-                // C. TAREFAS EXPIRADAS [LOG #37]
-                try {
-                    const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=true&filter_expired=false&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
-                    const expiradasRes = await axios.get(urlExpiradas, configIptvBase);
-                    const rawExpiradas = Array.isArray(expiradasRes.data) ? expiradasRes.data : (expiradasRes.data?.data || []);
-                    
-                    const dataLimiteCorte = Date.now() - (50 * 24 * 60 * 60 * 1000);
-                    countExpiradas = rawExpiradas.filter(t => new Date(t.expire_at || t.end_date).getTime() > dataLimiteCorte).length;
-                } catch (eExp) { console.error(`[BFF] Erro Expiradas: ${eExp.message}`); }
+                expiradas = (expiradasRaw.data || []).filter(t =>
+                    t.answer_id === null && new Date(t.expire_at || t.end_date) >= dataInicioBimestre
+                ).length;
 
-                // D. REDAÇÕES ISOLADAS [LOG #40]
-                try {
-                    const urlRedacoes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&is_essay=true&filter_expired=true&with_answer=true`;
-                    const redacoesRes = await axios.get(urlRedacoes, configIptvBase);
-                    const rawRedacoes = Array.isArray(redacoesRes.data) ? redacoesRes.data : (redacoesRes.data?.data || []);
-                    countRedacoes = rawRedacoes.filter(t => new Date(t.publish_at || t.start_date) >= dataInicioBimestre).length;
-                } catch (eRed) { console.error(`[BFF] Erro Redações: ${eRed.message}`); }
+                redacoes = (redacoesRaw.data || []).filter(t =>
+                    t.answer_id === null && new Date(t.publish_at || t.start_date) >= dataInicioBimestre
+                ).length;
 
-            } catch (errRooms) { console.error(`[BFF] Erro Estrutura Canais IPTV: ${errRooms.message}`); }
+                // Captura direta do motor de pesquisas (Surveys) mapeado como Avaliações
+                avaliacoes = surveyRes.data?.count || surveyRes.data?.required_count || 0;
+
+            } catch (errBatch) {
+                console.error(`[BFF] Erro no processamento do lote IP.TV: ${errBatch.message}`);
+            }
         }
 
-        // Retorno Limpo
+        // ----------------------------------------------------------
+        // RETORNO PADRONIZADO E HIGIENIZADO
+        // ----------------------------------------------------------
         res.json({
             aluno: {
                 nome: nomeCompletoAluno,
@@ -191,18 +168,18 @@ app.post('/api/consulta', async (req, res) => {
                 turma: infoTurma.DescricaoTurma || 'Não Informada'
             },
             indicadores: {
-                pendentes: countPendentes,
-                expiradas: countExpiradas,
-                avaliacoes: countAvaliacoes, 
-                redacoes: countRedacoes
+                pendentes: pendentes,
+                expiradas: expiradas,
+                avaliacoes: avaliacoes,
+                redacoes: redacoes
             }
         });
 
     } catch (error) {
-        console.error(`[BFF] Erro Operacional: ${error.message}`);
-        res.status(500).json({ error: "Falha de execução na consolidação da árvore de dados." });
+        console.error(`[BFF] Erro Crítico: ${error.message}`);
+        res.status(500).json({ error: "Erro de agregação no barramento principal do BFF." });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF Produção Homologado ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF Produção com Promise.all operando na porta ${PORT}`));
