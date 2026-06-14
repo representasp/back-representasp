@@ -33,8 +33,9 @@ app.post('/api/consulta', async (req, res) => {
             }
         );
 
-        // CORREÇÃO AQUI: Mapeando a estrutura exata do retorno da SED
+        // Extraindo os dois tipos de token e os dados do usuário
         const tokenSED = loginResponse.data.token;
+        const tokenResumoSED = loginResponse.data.tokenResumo;
         const dadosUsuario = loginResponse.data.DadosUsuario;
 
         if (!tokenSED || !dadosUsuario || !dadosUsuario.CD_USUARIO) {
@@ -43,29 +44,39 @@ app.post('/api/consulta', async (req, res) => {
 
         const codigoAluno = dadosUsuario.CD_USUARIO;
 
-        // PASSO B: Troca de Token (IP.TV) - Passando o JWT obtido da SED
+        // PASSO B: Troca de Token (IP.TV)
+        // Tentamos primeiro com o tokenResumo, se não houver, usamos o token padrão
+        const tokenParaIPTV = tokenResumoSED || tokenSED;
+
         const iptvTokenResponse = await axios.post(
             'https://edusp-api.ip.tv/registration/edusp/token',
-            { token: tokenSED },
+            { token: tokenParaIPTV },
             {
                 headers: {
-                    ...browserHeaders,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/plain, */*',
                     'x-api-realm': 'edusp',
                     'x-api-platform': 'webclient',
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'Origin': 'https://saladofuturo.educacao.sp.gov.br',
+                    'Referer': 'https://saladofuturo.educacao.sp.gov.br/'
                 }
             }
         );
 
         const auth_token_iptv = iptvTokenResponse.data.auth_token;
 
-        // PASSO C, D e E: Consultas paralelas usando o códigoAluno corrigido
+        // PASSO C, D e E: Consultas paralelas
         const [dadosEscolares, pendenciasResponse, avaliacoesResponse] = await Promise.all([
             axios.get(`https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`, {
                 headers: { ...browserHeaders, 'Ocp-Apim-Subscription-Key': 'd701a2043aa24d7ebb37e9adf60d043b' }
             }),
             axios.get('https://edusp-api.ip.tv/tms/task/todo/count?filter_expired=true', {
-                headers: { ...browserHeaders, 'x-api-key': auth_token_iptv }
+                headers: { 
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/plain, */*',
+                    'x-api-key': auth_token_iptv 
+                }
             }),
             axios.get(`https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${codigoAluno}&AnoLetivo=2026`, {
                 headers: { ...browserHeaders, 'Ocp-Apim-Subscription-Key': 'd701a2043aa24d7ebb37e9adf60d043b' }
@@ -75,7 +86,6 @@ app.post('/api/consulta', async (req, res) => {
         const infoEscola = dadosEscolares.data[0] || {};
         const totalAvaliacoes = Array.isArray(avaliacoesResponse.data) ? avaliacoesResponse.data.length : 0;
 
-        // Retorna tudo consolidado para o seu index.html
         res.json({
             aluno: {
                 codigo: codigoAluno,
@@ -100,4 +110,4 @@ app.post('/api/consulta', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF rodando perfeitamente na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF atualizado na porta ${PORT}`));
