@@ -36,22 +36,21 @@ app.post('/api/consulta', async (req, res) => {
         );
 
         const tokenSed = loginRes.data.token;
-        const cdUsuario9 = loginRes.data.DadosUsuario?.CD_USUARIO?.toString();
+        const dadosUsuario = loginRes.data.DadosUsuario || {};
+        const cdUsuario9 = dadosUsuario.CD_USUARIO?.toString();
         const cdUsuario8 = cdUsuario9 ? cdUsuario9.substring(0, 8) : '';
+        const nomeCompletoAluno = dadosUsuario.NAME || 'Estudante Sem Nome';
 
-        // CAPTURA DOS COOKIES DE AFINIDADE DO GATEWAY AZURE (Resolve o 401)
+        // Captura de cookies para evitar o 401 nas rotas da SED
         const cookiesRecebidos = loginRes.headers['set-cookie'] || [];
         const cookiesFiltrados = cookiesRecebidos.map(cookie => cookie.split(';')[0]).join('; ');
 
-        console.log(`[BFF] Cookies de afinidade mapeados com sucesso.`);
-
-        // Configuração de Headers com Injeção de Cookies e Token Estrito
         const sedConfig = {
             headers: {
                 'Authorization': `Bearer ${tokenSed}`,
                 'X-Product-Name': CONSTANTS.PRODUCT,
                 'Ocp-Apim-Subscription-Key': CONSTANTS.SUB_KEY,
-                'Cookie': cookiesFiltrados, // Envia de volta a afinidade exigida pelo Azure
+                'Cookie': cookiesFiltrados,
                 'Content-Type': 'application/json',
                 'Accept': 'application/json, text/plain, */*',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -61,24 +60,24 @@ app.post('/api/consulta', async (req, res) => {
         };
 
         // ----------------------------------------------------------
-        // 2. BUSCAR TURMA (Usando Cookies de Afinidade)
+        // 2. BUSCAR TURMA
         // ----------------------------------------------------------
         let infoTurma = {};
-        let escolaId = 0;
         try {
             const turmaRes = await axios.get(
                 `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${cdUsuario8}`, 
                 sedConfig
             );
             infoTurma = Array.isArray(turmaRes.data) ? turmaRes.data[0] : (turmaRes.data.data || {});
-            escolaId = infoTurma.CodigoEscola || 0;
-            console.log(`[BFF] Rota de Turma Sucesso! Escola: ${escolaId}`);
+            if (Array.isArray(turmaRes.data?.data)) {
+                infoTurma = turmaRes.data.data[0];
+            }
         } catch (errTurma) {
-            console.error(`[BFF] Erro na rota de Turma mesmo com afinidade: ${errTurma.message}`);
+            console.error(`[BFF] Erro na rota de Turma: ${errTurma.message}`);
         }
 
         // ----------------------------------------------------------
-        // 3. HANDSHAKE IP.TV (Ajuste de Rota)
+        // 3. HANDSHAKE IP.TV
         // ----------------------------------------------------------
         let authTokenIptv = null;
         try {
@@ -87,7 +86,7 @@ app.post('/api/consulta', async (req, res) => {
                 {
                     httpsAgent,
                     headers: {
-                        'Host': 'edusp-api.ip.tv', // Alinhado com o Nginx reverso
+                        'Host': 'edusp',
                         'x-api-realm': 'edusp',
                         'x-api-platform': 'webclient',
                         'Content-Type': 'application/json',
@@ -97,28 +96,11 @@ app.post('/api/consulta', async (req, res) => {
             );
             authTokenIptv = iptvHandshake.data?.auth_token;
         } catch (errIptv) {
-            // Fallback de contingência caso o Nginx exija Host reduzido
-            try {
-                const iptvRetry = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
-                    { token: tokenSed },
-                    {
-                        httpsAgent,
-                        headers: {
-                            'Host': 'edusp',
-                            'x-api-realm': 'edusp',
-                            'x-api-platform': 'webclient',
-                            'Content-Type': 'application/json'
-                        }
-                    }
-                );
-                authTokenIptv = iptvRetry.data?.auth_token;
-            } catch (e) {
-                console.error(`[BFF] Falha total no Handshake IPTV: ${e.message}`);
-            }
+            console.error(`[BFF] Falha no Handshake IPTV primário: ${errIptv.message}`);
         }
 
         // ----------------------------------------------------------
-        // 4. BUSCAR AVALIAÇÕES (Usando Cookies de Afinidade)
+        // 4. BUSCAR AVALIAÇÕES
         // ----------------------------------------------------------
         let totalAvaliacoes = 0;
         try {
@@ -134,26 +116,32 @@ app.post('/api/consulta', async (req, res) => {
         // ----------------------------------------------------------
         let tarefasPendentes = 0;
         let tarefasExpiradas = 0;
+        
         if (authTokenIptv) {
             try {
                 const tasksRes = await axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo/count?filter_expired=true&publication_target=vialv`, {
                     httpsAgent,
                     headers: { 
                         'x-api-key': authTokenIptv, 
-                        'Host': 'edusp-api.ip.tv',
+                        'Host': 'edusp',
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                     }
                 });
-                tarefasPendentes = tasksRes.data?.todo || 0;
-                tarefasExpiradas = tasksRes.data?.expired || 0;
+                
+                // Mapeamento defensivo amplo para capturar qualquer variação de propriedade do objeto IP.TV
+                tarefasPendentes = tasksRes.data?.todo ?? tasksRes.data?.count ?? tasksRes.data?.tarefas_pendentes ?? 0;
+                tarefasExpiradas = tasksRes.data?.expired ?? tasksRes.data?.expiradas ?? 0;
+                
+                console.log(`[BFF] Tarefas decodificadas com sucesso -> Pendentes: ${tarefasPendentes}`);
             } catch (errTasks) {
                 console.error(`[BFF] Erro na busca de tarefas IP.TV: ${errTasks.message}`);
             }
         }
 
-        // Resposta consolidada limpa
+        // RESPOSTA COMPLETA E CORRIGIDA PARA O SEU DASHBOARD
         res.json({
             aluno: {
+                nome: nomeCompletoAluno, // Injetado com sucesso do LoginCompletoToken!
                 codigo: cdUsuario8,
                 escola: infoTurma.NomeEscola || 'Não Informada',
                 turma: infoTurma.DescricaoTurma || 'Não Informada'
@@ -162,7 +150,7 @@ app.post('/api/consulta', async (req, res) => {
                 pendentes: tarefasPendentes,
                 expiradas: tarefasExpiradas,
                 avaliacoes: totalAvaliacoes,
-                redacoes: 0
+                redacoes: 0 // Mantido estático por enquanto
             }
         });
 
@@ -176,4 +164,4 @@ app.post('/api/consulta', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF com Gerenciador de Afinidade Ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF Completo com Mapeamento Corrigido ativo na porta ${PORT}`));
