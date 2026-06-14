@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 
-const app = express();
+const app = report = express();
 app.use(express.json());
 app.use(cors());
 
@@ -42,17 +42,20 @@ app.post('/api/consulta', async (req, res) => {
             return res.status(401).json({ error: 'Falha na leitura dos dados de autenticação da SED.' });
         }
 
-        const codigoAluno = dadosUsuario.CD_USUARIO; 
+        // CAPTURA DO ID ORIGINAL (9 dígitos)
+        const codigoAlunoOriginal = dadosUsuario.CD_USUARIO.toString(); 
 
-        // GARANTIA DE FORMATO: Se o token já vier com "Bearer ", usamos direto. Se não, adicionamos o espaço.
-        const tokenFormatado = tokenLongoSED.startsWith('Bearer') ? tokenLongoSED : `Bearer ${tokenLongoSED}`;
+        // O PULO DO GATO: Remove o último dígito conforme o log oficial (Trunca para 8 dígitos)
+        const codigoAlunoTruncado = codigoAlunoOriginal.slice(0, -1);
 
-        // Montagem estruturada conforme APIM Azure da SED
+        console.log(`[BFF] ID Original: ${codigoAlunoOriginal} | ID Truncado para Consultas: ${codigoAlunoTruncated = codigoAlunoTruncado}`);
+
+        // Montagem exata do Header de Autorização exigido pela SED
         const sedAuthHeaders = {
             ...browserHeaders,
             'Ocp-Apim-Subscription-Key': 'd701a2043aa24d7ebb37e9adf60d043b',
             'X-Product-Name': 'SalaDoFuturo',
-            'Authorization': tokenFormatado
+            'Authorization': `Bearer ${tokenLongoSED}` // Prefixo puro + espaço + token longo
         };
 
         let infoEscola = {};
@@ -62,11 +65,11 @@ app.post('/api/consulta', async (req, res) => {
         let totalAvaliacoes = 0;
 
         // ==========================================================
-        // [#3] CONSULTA DE TURMA (SED)
+        // [#3] CONSULTA DE TURMA (SED) - Usando o ID de 8 dígitos
         // ==========================================================
         try {
             const dadosEscolares = await axios.get(
-                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAluno}`, 
+                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${codigoAlunoTruncado}`, 
                 { headers: sedAuthHeaders }
             );
             if (dadosEscolares.data && dadosEscolares.data[0]) {
@@ -120,7 +123,6 @@ app.post('/api/consulta', async (req, res) => {
                     'x-api-key': auth_token_iptv 
                 };
 
-                // CORREÇÃO DA IP.TV: Injetado o parâmetro mandatório 'publication_target=vialv'
                 const pendenciasResponse = await axios.get(
                     'https://edusp-api.ip.tv/tms/task/todo/count?filter_expired=true&publication_target=vialv', 
                     { headers: iptvDataHeaders }
@@ -133,11 +135,11 @@ app.post('/api/consulta', async (req, res) => {
         }
 
         // ==========================================================
-        // [#26] CONSULTA DE AVALIAÇÕES (SED)
+        // [#26] CONSULTA DE AVALIAÇÕES (SED) - Usando o ID de 8 dígitos
         // ==========================================================
         try {
             const avaliacoesResponse = await axios.get(
-                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${codigoAluno}&AnoLetivo=2026`, 
+                `https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${codigoAlunoTruncado}&AnoLetivo=2026`, 
                 { headers: sedAuthHeaders }
             );
             if (Array.isArray(avaliacoesResponse.data)) {
@@ -147,10 +149,10 @@ app.post('/api/consulta', async (req, res) => {
             console.error('Erro na rota #26 (Avaliações):', e.response?.data || e.message);
         }
 
-        // Devolve os dados preenchidos com sucesso
+        // Devolve os dados consolidados e corrigidos
         res.json({
             aluno: {
-                codigo: codigoAluno,
+                codigo: codigoAlunoTruncado,
                 escola: infoEscola.NomeEscola || 'Não Informada',
                 turma: infoEscola.DescricaoTurma || 'Não Informada'
             },
@@ -163,10 +165,10 @@ app.post('/api/consulta', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Erro crítico no núcleo do barramento:', error.message);
+        console.error('Erro crítico no barramento principal:', error.message);
         res.status(500).json({ error: 'Erro ao processar dados no servidor administrativo.' });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF calibrado ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF operando com ID de 8 dígitos na porta ${PORT}`));
