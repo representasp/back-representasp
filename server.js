@@ -42,11 +42,9 @@ app.post('/api/consulta', async (req, res) => {
         const nomeCompletoAluno = dadosUsuario.NAME || 'Estudante';
         const nickAluno = dadosUsuario.NM_NICK || '';
 
-        // Captura e isolamento de cookies do Azure Application Gateway
         const cookiesRecebidos = loginRes.headers['set-cookie'] || [];
         const cookiesFiltrados = cookiesRecebidos.map(cookie => cookie.split(';')[0]).join('; ');
 
-        // Configuração padrão reutilizável para chamadas da SED
         const sedConfig = {
             headers: {
                 'Authorization': `Bearer ${tokenSed}`,
@@ -80,7 +78,7 @@ app.post('/api/consulta', async (req, res) => {
         }
 
         // ----------------------------------------------------------
-        // 3. HANDSHAKE IP.TV
+        // 3. HANDSHAKE IP.TV (FIXED HOST & ENDPOINT TO AVOID 404)
         // ----------------------------------------------------------
         let authTokenIptv = null;
         try {
@@ -89,21 +87,41 @@ app.post('/api/consulta', async (req, res) => {
                 {
                     httpsAgent,
                     headers: {
-                        'Host': 'edusp',
+                        'Host': 'edusp', // Força estritamente o Virtual Host exigido pelo Nginx
                         'x-api-realm': 'edusp',
                         'x-api-platform': 'webclient',
                         'Content-Type': 'application/json',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'application/json, text/plain, */*'
                     }
                 }
             );
             authTokenIptv = iptvHandshake.data?.auth_token;
+            console.log(`[BFF] Handshake IPTV efetuado com sucesso.`);
         } catch (errIptv) {
-            console.error(`[BFF] Erro no Handshake IPTV: ${errIptv.message}`);
+            console.error(`[BFF] Erro no Handshake IPTV (Tentando Fallback Host Completo): ${errIptv.message}`);
+            // Fallback com host absoluto se o gateway rejeitar o reduzido
+            try {
+                const iptvHandshakeFallback = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
+                    { token: tokenSed },
+                    {
+                        httpsAgent,
+                        headers: {
+                            'Host': 'edusp-api.ip.tv',
+                            'x-api-realm': 'edusp',
+                            'x-api-platform': 'webclient',
+                            'Content-Type': 'application/json'
+                        }
+                    }
+                );
+                authTokenIptv = iptvHandshakeFallback.data?.auth_token;
+            } catch (errFallback) {
+                console.error(`[BFF] Erro Crítico total no Handshake IPTV: ${errFallback.message}`);
+            }
         }
 
         // ----------------------------------------------------------
-        // 4. BUSCAR AVALIAÇÕES (SED - Dinâmico por AlunoId)
+        // 4. BUSCAR AVALIAÇÕES (SED)
         // ----------------------------------------------------------
         let totalAvaliacoes = 0;
         try {
@@ -123,12 +141,11 @@ app.post('/api/consulta', async (req, res) => {
 
         if (authTokenIptv) {
             try {
-                // PASSO A: Descobrir as salas (rooms) e categorias do aluno
                 const configIptvBase = {
                     httpsAgent,
                     headers: { 
                         'x-api-key': authTokenIptv, 
-                        'Host': 'edusp',
+                        'Host': 'edusp', // Mantido o Host edusp estrito para as sub-rotas
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                     }
                 };
@@ -136,7 +153,6 @@ app.post('/api/consulta', async (req, res) => {
                 const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
                 const rooms = roomsRes.data?.rooms || [];
                 
-                // Construção dinâmica da query de alvos exigida pelo gateway da CMSP/IP.TV
                 const targets = [];
                 rooms.forEach(r => {
                     if (r.name) {
@@ -152,7 +168,7 @@ app.post('/api/consulta', async (req, res) => {
 
                 const targetQuery = targets.length > 0 ? targets.join('&') : 'publication_target=all';
 
-                // PASSO B: Buscar Tarefas Pendentes
+                // Buscar Tarefas Pendentes
                 try {
                     const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&filter_expired=true&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
                     const pendentesRes = await axios.get(urlPendentes, configIptvBase);
@@ -160,7 +176,7 @@ app.post('/api/consulta', async (req, res) => {
                     tarefasPendentes = listaPendentes.length;
                 } catch (ePend) { console.error(`[BFF] Falha ao ler pendentes: ${ePend.message}`); }
 
-                // PASSO C: Buscar Tarefas Expiradas
+                // Buscar Tarefas Expiradas
                 try {
                     const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=true&filter_expired=false&with_answer=true`;
                     const expiradasRes = await axios.get(urlExpiradas, configIptvBase);
@@ -168,7 +184,7 @@ app.post('/api/consulta', async (req, res) => {
                     tarefasExpiradas = listaExpiradas.length;
                 } catch (eExp) { console.error(`[BFF] Falha ao ler expiradas: ${eExp.message}`); }
 
-                // PASSO D: Buscar Redações (Flag is_essay=true)
+                // Buscar Redações (is_essay=true)
                 try {
                     const urlRedacoes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&is_essay=true&filter_expired=true&with_answer=true`;
                     const redacoesRes = await axios.get(urlRedacoes, configIptvBase);
@@ -179,13 +195,15 @@ app.post('/api/consulta', async (req, res) => {
             } catch (errRooms) {
                 console.error(`[BFF] Erro na varredura estrutural da IP.TV: ${errRooms.message}`);
             }
+        } else {
+            console.log("[BFF] Ignorando busca de tarefas: Handshake IP.TV indisponível.");
         }
 
         // RESPOSTA FINAL COMPATÍVEL COM O SEU DASHBOARD
         res.json({
             aluno: {
                 nome: nomeCompletoAluno,
-                codigo: `${cdUsuario8}${user.slice(-3)}`, // Retorna o RA no formato completo original
+                codigo: `${cdUsuario8}${user.slice(-3)}`, 
                 escola: infoTurma.NomeEscola || 'Não Informada',
                 turma: infoTurma.DescricaoTurma || 'Não Informada'
             },
