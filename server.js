@@ -35,7 +35,7 @@ app.post('/api/consulta', async (req, res) => {
             }
         );
 
-        let tokenLongoSED = loginResponse.data.token;
+        const tokenLongoSED = loginResponse.data.token;
         const dadosUsuario = loginResponse.data.DadosUsuario;
 
         if (!tokenLongoSED || !dadosUsuario || !dadosUsuario.CD_USUARIO) {
@@ -44,17 +44,15 @@ app.post('/api/consulta', async (req, res) => {
 
         const codigoAluno = dadosUsuario.CD_USUARIO; 
 
-        // TRATAMENTO DO TOKEN: Remove a palavra "Bearer " caso a SED já a envie no texto do token
-        if (tokenLongoSED.startsWith('Bearer ')) {
-            tokenLongoSED = tokenLongoSED.replace('Bearer ', '');
-        }
+        // GARANTIA DE FORMATO: Se o token já vier com "Bearer ", usamos direto. Se não, adicionamos o espaço.
+        const tokenFormatado = tokenLongoSED.startsWith('Bearer') ? tokenLongoSED : `Bearer ${tokenLongoSED}`;
 
-        // Montagem correta e limpa do Header de Autorização
+        // Montagem estruturada conforme APIM Azure da SED
         const sedAuthHeaders = {
             ...browserHeaders,
             'Ocp-Apim-Subscription-Key': 'd701a2043aa24d7ebb37e9adf60d043b',
             'X-Product-Name': 'SalaDoFuturo',
-            'Authorization': `Bearer ${tokenLongoSED}`
+            'Authorization': tokenFormatado
         };
 
         let infoEscola = {};
@@ -76,7 +74,6 @@ app.post('/api/consulta', async (req, res) => {
                 escolaId = infoEscola.CodigoEscola || 0;
             }
         } catch (e) {
-            // Imprime o erro real no painel do Render para sabermos por que a rota #3 falhou
             console.error('Erro na rota #3 (Turma):', e.response?.data || e.message);
         }
 
@@ -95,7 +92,7 @@ app.post('/api/consulta', async (req, res) => {
         }
 
         // ==========================================================
-        // [#5] HANDSHAKE IP.TV
+        // [#5] HANDSHAKE IP.TV e TAREFAS
         // ==========================================================
         try {
             const iptvTokenResponse = await axios.post(
@@ -123,15 +120,16 @@ app.post('/api/consulta', async (req, res) => {
                     'x-api-key': auth_token_iptv 
                 };
 
+                // CORREÇÃO DA IP.TV: Injetado o parâmetro mandatório 'publication_target=vialv'
                 const pendenciasResponse = await axios.get(
-                    'https://edusp-api.ip.tv/tms/task/todo/count?filter_expired=true', 
+                    'https://edusp-api.ip.tv/tms/task/todo/count?filter_expired=true&publication_target=vialv', 
                     { headers: iptvDataHeaders }
                 );
                 tarefasPendentes = pendenciasResponse.data.todo || 0;
                 tarefasExpiradas = pendenciasResponse.data.expired || 0;
             }
         } catch (e) {
-            console.error('Erro na IP.TV (Handshake/Tarefas):', e.response?.data || e.message);
+            console.error('Erro na IP.TV:', e.response?.data || e.message);
         }
 
         // ==========================================================
@@ -149,7 +147,7 @@ app.post('/api/consulta', async (req, res) => {
             console.error('Erro na rota #26 (Avaliações):', e.response?.data || e.message);
         }
 
-        // Retorna a resposta (agora capturando os logs internos de erro)
+        // Devolve os dados preenchidos com sucesso
         res.json({
             aluno: {
                 codigo: codigoAluno,
@@ -165,10 +163,10 @@ app.post('/api/consulta', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Erro crítico geral:', error.message);
+        console.error('Erro crítico no núcleo do barramento:', error.message);
         res.status(500).json({ error: 'Erro ao processar dados no servidor administrativo.' });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF ativo e diagnosticando na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF calibrado ativo na porta ${PORT}`));
