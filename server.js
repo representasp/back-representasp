@@ -12,21 +12,19 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const CONSTANTS = {
     SUB_KEY: 'd701a2043aa24d7ebb37e9adf60d043b',
     PRODUCT: 'SalaDoFuturo',
-    BASE_SED: 'https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi'
+    BASE_SED: 'https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi',
+    BASE_IPTV: 'https://edusp-api.ip.tv' // Validado com sucesso no diagnóstico
 };
 
 app.post('/api/consulta', async (req, res) => {
     const { user, senha } = req.body;
 
-    console.log(`\n==================================================`);
-    console.log(`[DIAGNÓSTICO] INICIANDO VARREDURA PARA O RA: ${user}`);
-    console.log(`==================================================`);
+    console.log(`\n=== [BFF PRODUÇÃO] PROCESSANDO INTEGRAÇÃO PARA: ${user} ===`);
 
     try {
         // ----------------------------------------------------------
-        // STEP 1: AUTENTICAÇÃO NA SED
+        // 1. LOGIN SED
         // ----------------------------------------------------------
-        console.log(`[DIAGNÓSTICO] 1. Tentando LoginCompletoToken...`);
         const loginRes = await axios.post(`${CONSTANTS.BASE_SED}/credenciais/api/LoginCompletoToken`,
             { user, senha },
             { headers: {
@@ -38,78 +36,178 @@ app.post('/api/consulta', async (req, res) => {
         );
 
         const tokenSed = loginRes.data.token;
-        console.log(`[DIAGNÓSTICO] Token SED obtido com sucesso (Tamanho: ${tokenSed?.length ?? 0})`);
+        const dadosUsuario = loginRes.data.DadosUsuario || {};
+        const cdUsuario9 = dadosUsuario.CD_USUARIO?.toString();
+        const cdUsuario8 = cdUsuario9 ? cdUsuario9.substring(0, 8) : '';
+        const nomeCompletoAluno = dadosUsuario.NAME || 'Estudante';
 
-        // ----------------------------------------------------------
-        // STEP 2: MARATONA DE TESTES ENDPOINTS IPTV (PROCURANDO ROTAS DO LOG)
-        // ----------------------------------------------------------
-        console.log(`\n[DIAGNÓSTICO] 2. Iniciando testes de Handshake IPTV...`);
-        
-        const cenariosIptv = [
-            {
-                nome: "Cenário A: edusp-api com Host edusp (Padrão do App)",
-                url: "https://edusp-api.ip.tv/registration/edusp/token",
-                headers: { 'Host': 'edusp', 'x-api-realm': 'edusp', 'x-api-platform': 'webclient' }
-            },
-            {
-                nome: "Cenário B: edusp-api sem Host modificado",
-                url: "https://edusp-api.ip.tv/registration/edusp/token",
-                headers: { 'x-api-realm': 'edusp', 'x-api-platform': 'webclient' }
-            },
-            {
-                nome: "Cenário C: Rota de Contingência Direta da SED",
-                url: `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/IPTV/Token`, // Rota espelho comum em BFFs da SED
-                headers: { 'Authorization': `Bearer ${tokenSed}`, 'X-Product-Name': CONSTANTS.PRODUCT, 'Ocp-Apim-Subscription-Key': CONSTANTS.SUB_KEY }
+        const cookiesRecebidos = loginRes.headers['set-cookie'] || [];
+        const cookiesFiltrados = cookiesRecebidos.map(cookie => cookie.split(';')[0]).join('; ');
+
+        const sedConfig = {
+            headers: {
+                'Authorization': `Bearer ${tokenSed}`,
+                'X-Product-Name': CONSTANTS.PRODUCT,
+                'Ocp-Apim-Subscription-Key': CONSTANTS.SUB_KEY,
+                'Cookie': cookiesFiltrados,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/plain, */*',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Origin': 'https://saladofuturo.educacao.sp.gov.br',
+                'Referer': 'https://saladofuturo.educacao.sp.gov.br/'
             }
-        ];
+        };
 
-        let resultadoHandshake = null;
+        // ----------------------------------------------------------
+        // 2. BUSCAR TURMA (SED)
+        // ----------------------------------------------------------
+        let infoTurma = {};
+        try {
+            const turmaRes = await axios.get(
+                `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${cdUsuario8}`, 
+                sedConfig
+            );
+            if (Array.isArray(turmaRes.data)) {
+                infoTurma = turmaRes.data[0];
+            } else if (turmaRes.data?.data) {
+                infoTurma = Array.isArray(turmaRes.data.data) ? turmaRes.data.data[0] : turmaRes.data.data;
+            }
+        } catch (errTurma) {
+            console.error(`[BFF] Erro na rota de Turma: ${errTurma.message}`);
+        }
 
-        for (const cenario of cenariosIptv) {
-            console.log(`\nExecutando: ${cenario.nome}`);
-            console.log(`URL: ${cenario.url}`);
-            try {
-                const response = await axios.post(cenario.url, 
-                    cenario.url.includes('token') ? { token: tokenSed } : {}, 
-                    { 
-                        httpsAgent, 
-                        headers: {
-                            ...cenario.headers,
-                            'Content-Type': 'application/json',
-                            'User-Agent': 'Mozilla/5.0'
-                        },
-                        timeout: 5000 
+        // ----------------------------------------------------------
+        // 3. HANDSHAKE IP.TV (Baseado 100% no Cenário B de Sucesso)
+        // ----------------------------------------------------------
+        let authTokenIptv = null;
+        let nickAluno = '';
+        try {
+            const iptvHandshake = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
+                { token: tokenSed },
+                {
+                    httpsAgent,
+                    headers: {
+                        'x-api-realm': 'edusp',
+                        'x-api-platform': 'webclient',
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'User-Agent': 'Mozilla/5.0'
                     }
-                );
-                console.log(`🟢 SUCESSO no ${cenario.nome}! Status: ${response.status}`);
-                console.log(`Payload Recebido:`, JSON.stringify(response.data));
-                if (response.data?.auth_token || response.data?.token) {
-                    resultadoHandshake = response.data?.auth_token || response.data?.token;
                 }
-            } catch (err) {
-                console.error(`🔴 FALHA no ${cenario.nome}`);
-                console.error(`Status: ${err.response?.status || 'Sem Resposta'}`);
-                console.error(`Mensagem de Erro: ${err.message}`);
-                if (err.response?.data) {
-                    console.error(`Corpo do erro do servidor do governo:`, JSON.stringify(err.response.data));
-                }
+            );
+            
+            authTokenIptv = iptvHandshake.data?.auth_token;
+            nickAluno = iptvHandshake.data?.nick || '';
+            console.log(`[BFF] Handshake IPTV efetuado com sucesso para o nick: ${nickAluno}`);
+        } catch (errIptv) {
+            console.error(`[BFF] Erro Crítico no Handshake IPTV: ${errIptv.message}`);
+        }
+
+        // ----------------------------------------------------------
+        // 4. BUSCAR AVALIAÇÕES (SED - Totalmente dinâmico pelo ID correto)
+        // ----------------------------------------------------------
+        let totalAvaliacoes = 0;
+        try {
+            const avalRes = await axios.get(`${CONSTANTS.BASE_SED}/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${cdUsuario8}&AnoLetivo=2026`, sedConfig);
+            const listaAvaliacoes = Array.isArray(avalRes.data) ? avalRes.data : (avalRes.data.data || []);
+            totalAvaliacoes = listaAvaliacoes.length;
+        } catch (errAval) {
+            console.error(`[BFF] Erro na rota de avaliações: ${errAval.message}`);
+        }
+
+        // ----------------------------------------------------------
+        // 5. PROCESSAMENTO DE TAREFAS E REDAÇÕES NA IP.TV
+        // ----------------------------------------------------------
+        let tarefasPendentes = 0;
+        let tarefasExpiradas = 0;
+        let totalRedacoes = 0;
+
+        if (authTokenIptv) {
+            try {
+                const configIptvBase = {
+                    httpsAgent,
+                    headers: { 
+                        'x-api-key': authTokenIptv, 
+                        'Accept': 'application/json',
+                        'User-Agent': 'Mozilla/5.0'
+                    }
+                };
+
+                // Puxando as salas dinâmicas vinculadas à conta do aluno
+                const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
+                const rooms = roomsRes.data?.rooms || [];
+                
+                // Montando a matriz de publication_targets exigidos pelo barramento do CMSP
+                const targets = [];
+                rooms.forEach(r => {
+                    if (r.name) {
+                        targets.push(`publication_target=${r.name}`);
+                        if (nickAluno) {
+                            targets.push(`publication_target=${r.name}:${nickAluno}`);
+                        }
+                    }
+                    if (Array.isArray(r.category_ids)) {
+                        r.category_ids.forEach(id => targets.push(`publication_target=${id}`));
+                    }
+                });
+
+                const targetQuery = targets.length > 0 ? targets.join('&') : 'publication_target=all';
+
+                // Consulta de Tarefas Pendentes
+                try {
+                    const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&filter_expired=true&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
+                    const pendentesRes = await axios.get(urlPendentes, configIptvBase);
+                    const listaPendentes = Array.isArray(pendentesRes.data) ? pendentesRes.data : (pendentesRes.data?.data || []);
+                    tarefasPendentes = listaPendentes.length;
+                } catch (ePend) { console.error(`[BFF] Falha ao consultar tarefas pendentes: ${ePend.message}`); }
+
+                // Consulta de Tarefas Expiradas
+                try {
+                    const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=true&filter_expired=false&with_answer=true`;
+                    const expiradasRes = await axios.get(urlExpiradas, configIptvBase);
+                    const listaExpiradas = Array.isArray(expiradasRes.data) ? expiradasRes.data : (expiradasRes.data?.data || []);
+                    tarefasExpiradas = listaExpiradas.length;
+                } catch (eExp) { console.error(`[BFF] Falha ao consultar tarefas expiradas: ${eExp.message}`); }
+
+                // Consulta de Redações Ativas (Filtro estrutural is_essay=true)
+                try {
+                    const urlRedacoes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&is_essay=true&filter_expired=true&with_answer=true`;
+                    const redacoesRes = await axios.get(urlRedacoes, configIptvBase);
+                    const listaRedacoes = Array.isArray(redacoesRes.data) ? redacoesRes.data : (redacoesRes.data?.data || []);
+                    totalRedacoes = listaRedacoes.length;
+                } catch (eRed) { console.error(`[BFF] Falha ao consultar redações de canal síncrono: ${eRed.message}`); }
+
+            } catch (errRooms) {
+                console.error(`[BFF] Erro na varredura estrutural das salas IP.TV: ${errRooms.message}`);
             }
         }
 
         // ----------------------------------------------------------
-        // RETORNO PADRÃO DE CONTINGÊNCIA PARA O FRONT NÃO TRAVAR
+        // RETORNO PADRÃO FORMATADO PARA O SEU FRONTEND
         // ----------------------------------------------------------
         res.json({
-            diagnostico: "Varredura executada. Verifique os logs do Render imediatamente para copiar os erros brutos.",
-            tokenIptvEncontrado: resultadoHandshake ? "Sim" : "Não",
-            aluno: loginRes.data.DadosUsuario?.NAME || "Estudante"
+            aluno: {
+                nome: nomeCompletoAluno,
+                codigo: `${cdUsuario8}${user.slice(-3)}`, 
+                escola: infoTurma.NomeEscola || 'Não Informada',
+                turma: infoTurma.DescricaoTurma || 'Não Informada'
+            },
+            indicadores: {
+                pendentes: tarefasPendentes,
+                expiradas: tarefasExpiradas,
+                avaliacoes: totalAvaliacoes,
+                redacoes: totalRedacoes
+            }
         });
 
     } catch (error) {
-        console.error(`\n[DIAGNÓSTICO ERRO CRÍTICO NO PASSO 1]: ${error.message}`);
-        res.status(500).json({ error: error.message, stack: error.stack });
+        console.error(`[BFF] Erro Crítico Executivo: ${error.message}`);
+        res.status(error.response ? error.response.status : 500).json({
+            error: "Erro de processamento no barramento centralizado da Sala do Futuro.",
+            details: error.message
+        });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF de Diagnóstico Ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF Produção em Escala Ativo na porta ${PORT}`));
