@@ -3,7 +3,7 @@ const axios = require('axios');
 const https = require('https');
 const cors = require('cors');
 
-const app = reportExpress || express(); // Mantém compatibilidade com sua estrutura
+const app = express();
 app.use(express.json());
 app.use(cors());
 
@@ -61,7 +61,7 @@ app.post('/api/consulta', async (req, res) => {
         // 2. BUSCAR TURMA E COLETAR ID DA ESCOLA [LOG #4]
         // ----------------------------------------------------------
         let infoTurma = {};
-        let escolaId = null;
+        let schoolId = null;
         try {
             const turmaRes = await axios.get(
                 `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${cdUsuario8}`, 
@@ -69,16 +69,16 @@ app.post('/api/consulta', async (req, res) => {
             );
             if (Array.isArray(turmaRes.data) && turmaRes.data.length > 0) infoTurma = turmaRes.data[0];
             else if (turmaRes.data?.data) infoTurma = Array.isArray(turmaRes.data.data) ? turmaRes.data.data[0] : turmaRes.data.data;
-            escolaId = infoTurma?.CodigoEscola || infoTurma?.CD_ESCOLA;
+            schoolId = infoTurma?.CodigoEscola || infoTurma?.CD_ESCOLA;
         } catch (err) { console.error(`[BFF] Erro Turma: ${err.message}`); }
 
         // ----------------------------------------------------------
         // 3. ANCORAGEM DE TEMPO DO BIMESTRE CORRENTE [LOG #4]
         // ----------------------------------------------------------
-        let dataInicioBimestre = new Date("2026-04-22T00:00:00.000Z"); // Fallback padrão do 2º Bimestre de 2026
-        if (escolaId) {
+        let dataInicioBimestre = new Date("2026-04-22T00:00:00.000Z"); 
+        if (schoolId) {
             try {
-                const bimestreRes = await axios.get(`${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Bimestre/ListarBimestres?escolaId=${escolaId}`, sedConfig);
+                const bimestreRes = await axios.get(`${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Bimestre/ListarBimestres?escolaId=${schoolId}`, sedConfig);
                 const listaBimestres = bimestreRes.data?.data || bimestreRes.data || [];
                 if (Array.isArray(listaBimestres)) {
                     const bAtivo = listaBimestres.find(b => b.Ativo === true || b.NumeroBimestre === 2);
@@ -115,7 +115,7 @@ app.post('/api/consulta', async (req, res) => {
         // ----------------------------------------------------------
         let countPendentes = 0;
         let countExpiradas = 0;
-        let countAvaliacoes = 0; // Representa as Pesquisas/Surveys da IP.TV agora
+        let countAvaliacoes = 0; 
         let countRedacoes = 0;
 
         if (authTokenIptv) {
@@ -129,7 +129,6 @@ app.post('/api/consulta', async (req, res) => {
                     }
                 };
 
-                // Puxar as salas ativas do barramento do aluno
                 const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
                 const rooms = roomsRes.data?.rooms || [];
                 
@@ -144,26 +143,25 @@ app.post('/api/consulta', async (req, res) => {
                 if (targets.length === 0) targets.push('publication_target=all');
                 const targetQuery = targets.join('&');
 
-                // A. CORREÇÃO DAS PESQUISAS (AVALIAÇÕES NO APP) [LOG #23]
+                // A. CORREÇÃO DAS PESQUISAS [LOG #23]
                 try {
                     const surveyRes = await axios.get(`${CONSTANTS.BASE_IPTV}/survey/todo/count?${targetQuery}&filter_expired=true&with_answer=true&answer_statuses=draft`, configIptvBase);
                     countAvaliacoes = surveyRes.data?.count || surveyRes.data?.required_count || 0;
                 } catch (eSurv) { console.error(`[BFF] Erro /survey/todo/count: ${eSurv.message}`); }
 
-                // B. TAREFAS PENDENTES (Limpando o 7 fixo e rascunhos velhos) [LOG #35]
+                // B. TAREFAS PENDENTES [LOG #35]
                 try {
                     const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=false&filter_expired=true&is_exam=false&is_essay=false&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
                     const pendentesRes = await axios.get(urlPendentes, configIptvBase);
                     const rawPendentes = Array.isArray(pendentesRes.data) ? pendentesRes.data : (pendentesRes.data?.data || []);
                     
-                    // Só conta se nunca foi enviado (answer_id === null) e pertence ao bimestre corrente
                     countPendentes = rawPendentes.filter(t => 
                         (t.answer_id === null || !t.answer_id) && 
                         new Date(t.publish_at || t.start_date) >= dataInicioBimestre
                     ).length;
                 } catch (ePend) { console.error(`[BFF] Erro Pendentes: ${ePend.message}`); }
 
-                // C. TAREFAS EXPIRADAS (Mantendo o filtro de sucesso do passo anterior) [LOG #37]
+                // C. TAREFAS EXPIRADAS [LOG #37]
                 try {
                     const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=true&filter_expired=false&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
                     const expiradasRes = await axios.get(urlExpiradas, configIptvBase);
@@ -184,9 +182,7 @@ app.post('/api/consulta', async (req, res) => {
             } catch (errRooms) { console.error(`[BFF] Erro Estrutura Canais IPTV: ${errRooms.message}`); }
         }
 
-        // ----------------------------------------------------------
-        // RETORNO 100% HIGIENIZADO PARA O APP FRONTEND
-        // ----------------------------------------------------------
+        // Retorno Limpo
         res.json({
             aluno: {
                 nome: nomeCompletoAluno,
@@ -197,7 +193,7 @@ app.post('/api/consulta', async (req, res) => {
             indicadores: {
                 pendentes: countPendentes,
                 expiradas: countExpiradas,
-                avaliacoes: countAvaliacoes, // Agora sincronizado com as pesquisas oficiais
+                avaliacoes: countAvaliacoes, 
                 redacoes: countRedacoes
             }
         });
