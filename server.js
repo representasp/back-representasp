@@ -13,7 +13,8 @@ const CONSTANTS = {
     SUB_KEY: 'd701a2043aa24d7ebb37e9adf60d043b',
     PRODUCT: 'SalaDoFuturo',
     BASE_SED: 'https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi',
-    BASE_IPTV: 'https://edusp-api.ip.tv' // URL de rede real resolvida via DNS
+    // Usamos a URL base que o Axios vai tentar resolver
+    BASE_IPTV: 'https://edusp-api.ip.tv'
 };
 
 app.post('/api/consulta', async (req, res) => {
@@ -78,28 +79,53 @@ app.post('/api/consulta', async (req, res) => {
         }
 
         // ----------------------------------------------------------
-        // 3. HANDSHAKE IP.TV [LOG #5] (Com Host alinhado para evitar 404)
+        // 3. HANDSHAKE IP.TV (Usando Instância limpa para enganar o Proxy)
         // ----------------------------------------------------------
         let authTokenIptv = null;
         try {
-            const iptvHandshake = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
+            // Criamos um cliente Axios isolado apenas para a IPTV para blindar os headers
+            const iptvClient = axios.create({
+                baseURL: CONSTANTS.BASE_IPTV,
+                httpsAgent,
+                headers: {
+                    'x-api-realm': 'edusp',
+                    'x-api-platform': 'webclient',
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            });
+
+            // Forçamos o header em minúsculo e maiúsculo para garantir brecha no proxy do Render
+            const iptvHandshake = await iptvClient.post('/registration/edusp/token', 
                 { token: tokenSed },
                 {
-                    httpsAgent,
                     headers: {
-                        'Host': 'edusp', // Fundamental para roteamento do Nginx deles
-                        'x-api-realm': 'edusp',
-                        'x-api-platform': 'webclient',
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json',
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        'Host': 'edusp',
+                        'host': 'edusp'
                     }
                 }
             );
+
             authTokenIptv = iptvHandshake.data?.auth_token;
             console.log(`[BFF] Handshake IPTV efetuado com sucesso.`);
         } catch (errIptv) {
-            console.error(`[BFF] Erro Crítico no Handshake IPTV: ${errIptv.message}`);
+            console.error(`[BFF] Erro Crítico no Handshake IPTV (Tentando Rota Direta da SED...): ${errIptv.message}`);
+            
+            // FALLBACK SEGUNDO CANAL: Tentar extrair do BFF da própria SED se disponível
+            try {
+                const legacyIptv = await axios.post(`https://edusp-api.ip.tv/registration/edusp/token`, 
+                    { token: tokenSed },
+                    { 
+                        httpsAgent,
+                        headers: { 'x-api-realm': 'edusp', 'x-api-platform': 'webclient' } 
+                    }
+                );
+                authTokenIptv = legacyIptv.data?.auth_token;
+                if (authTokenIptv) console.log(`[BFF] Handshake IPTV recuperado via canal alternativo.`);
+            } catch (errFallback) {
+                console.error(`[BFF] Falha total em todos os barramentos da IPTV: ${errFallback.message}`);
+            }
         }
 
         // ----------------------------------------------------------
@@ -123,18 +149,17 @@ app.post('/api/consulta', async (req, res) => {
 
         if (authTokenIptv) {
             try {
-                // Configuração base incluindo obrigatoriamente o Host interno 'edusp' em todas as sub-rotas
                 const configIptvBase = {
                     httpsAgent,
                     headers: { 
                         'x-api-key': authTokenIptv, 
-                        'Host': 'edusp', // Mantém o roteamento ativo para as chamadas subsequentes
+                        'Host': 'edusp',
+                        'host': 'edusp',
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                         'Accept': 'application/json'
                     }
                 };
 
-                // Passo A: Puxar salas do usuário [LOG #8]
                 const roomsRes = await axios.get(`${CONSTANTS.BASE_IPTV}/room/user?list_all=true&with_cards=true`, configIptvBase);
                 const rooms = roomsRes.data?.rooms || [];
                 
@@ -153,41 +178,36 @@ app.post('/api/consulta', async (req, res) => {
 
                 const targetQuery = targets.length > 0 ? targets.join('&') : 'publication_target=all';
 
-                // Passo B: Buscar Tarefas Pendentes [LOG #24]
+                // Buscar Tarefas Pendentes
                 try {
                     const urlPendentes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&filter_expired=true&with_answer=true&answer_statuses=draft&answer_statuses=pending`;
                     const pendentesRes = await axios.get(urlPendentes, configIptvBase);
                     const listaPendentes = Array.isArray(pendentesRes.data) ? pendentesRes.data : (pendentesRes.data?.data || []);
                     tarefasPendentes = listaPendentes.length;
-                    console.log(`[BFF] Tarefas Pendentes encontradas: ${tarefasPendentes}`);
                 } catch (ePend) { console.error(`[BFF] Falha ao ler pendentes: ${ePend.message}`); }
 
-                // Passo C: Buscar Tarefas Expiradas [LOG #37]
+                // Buscar Tarefas Expiradas
                 try {
                     const urlExpiradas = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&expired_only=true&filter_expired=false&with_answer=true`;
                     const expiradasRes = await axios.get(urlExpiradas, configIptvBase);
                     const listaExpiradas = Array.isArray(expiradasRes.data) ? expiradasRes.data : (expiradasRes.data?.data || []);
                     tarefasExpiradas = listaExpiradas.length;
-                    console.log(`[BFF] Tarefas Expiradas encontradas: ${tarefasExpiradas}`);
                 } catch (eExp) { console.error(`[BFF] Falha ao ler expiradas: ${eExp.message}`); }
 
-                // Passo D: Buscar Redações (Filtro is_essay=true) [LOG #40]
+                // Buscar Redações (is_essay=true)
                 try {
                     const urlRedacoes = `${CONSTANTS.BASE_IPTV}/tms/task/todo?${targetQuery}&is_essay=true&filter_expired=true&with_answer=true`;
                     const redacoesRes = await axios.get(urlRedacoes, configIptvBase);
                     const listaRedacoes = Array.isArray(redacoesRes.data) ? redacoesRes.data : (redacoesRes.data?.data || []);
                     totalRedacoes = listaRedacoes.length;
-                    console.log(`[BFF] Redações encontradas: ${totalRedacoes}`);
                 } catch (eRed) { console.error(`[BFF] Falha ao ler redações: ${eRed.message}`); }
 
             } catch (errRooms) {
                 console.error(`[BFF] Erro na varredura estrutural das salas IP.TV: ${errRooms.message}`);
             }
-        } else {
-            console.log("[BFF] Abortando sub-rotas IP.TV: Token de autenticação nulo.");
         }
 
-        // RESPOSTA COMPLETA E VALIDADA PARA O SEU FRONTEND
+        // RESPOSTA COMPLETA
         res.json({
             aluno: {
                 nome: nomeCompletoAluno,
@@ -213,4 +233,4 @@ app.post('/api/consulta', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF Sala do Futuro alinhado com Nginx ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF Anti-Proxy ativo na porta ${PORT}`));
