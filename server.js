@@ -19,12 +19,8 @@ const CONSTANTS = {
 app.post('/api/consulta', async (req, res) => {
     const { user, senha } = req.body;
 
-    console.log(`\n=== [PRODUÇÃO] REQUISIÇÃO RECEBIDA PARA O RA: ${user} ===`);
-
     try {
-        // ----------------------------------------------------------
         // 1. LOGIN SED
-        // ----------------------------------------------------------
         const loginRes = await axios.post(`${CONSTANTS.BASE_SED}/credenciais/api/LoginCompletoToken`,
             { user, senha },
             { headers: {
@@ -39,9 +35,9 @@ app.post('/api/consulta', async (req, res) => {
         const dadosUsuario = loginRes.data.DadosUsuario || {};
         const cdUsuario9 = dadosUsuario.CD_USUARIO?.toString();
         const cdUsuario8 = cdUsuario9 ? cdUsuario9.substring(0, 8) : '';
-        const nomeCompletoAluno = dadosUsuario.NAME || 'Estudante Sem Nome';
+        const nomeCompletoAluno = dadosUsuario.NAME || 'Estudante';
 
-        // Captura de cookies para evitar o 401 nas rotas da SED
+        // Captura e formatação dos cookies de afinidade do gateway
         const cookiesRecebidos = loginRes.headers['set-cookie'] || [];
         const cookiesFiltrados = cookiesRecebidos.map(cookie => cookie.split(';')[0]).join('; ');
 
@@ -59,26 +55,23 @@ app.post('/api/consulta', async (req, res) => {
             }
         };
 
-        // ----------------------------------------------------------
         // 2. BUSCAR TURMA
-        // ----------------------------------------------------------
         let infoTurma = {};
         try {
             const turmaRes = await axios.get(
                 `${CONSTANTS.BASE_SED}/apihubintegracoes/api/v2/Turma/ListarTurmasPorAluno?codigoAluno=${cdUsuario8}`, 
                 sedConfig
             );
-            infoTurma = Array.isArray(turmaRes.data) ? turmaRes.data[0] : (turmaRes.data.data || {});
-            if (Array.isArray(turmaRes.data?.data)) {
-                infoTurma = turmaRes.data.data[0];
+            if (Array.isArray(turmaRes.data)) {
+                infoTurma = turmaRes.data[0];
+            } else if (turmaRes.data?.data) {
+                infoTurma = Array.isArray(turmaRes.data.data) ? turmaRes.data.data[0] : turmaRes.data.data;
             }
         } catch (errTurma) {
             console.error(`[BFF] Erro na rota de Turma: ${errTurma.message}`);
         }
 
-        // ----------------------------------------------------------
         // 3. HANDSHAKE IP.TV
-        // ----------------------------------------------------------
         let authTokenIptv = null;
         try {
             const iptvHandshake = await axios.post(`${CONSTANTS.BASE_IPTV}/registration/edusp/token`,
@@ -96,12 +89,10 @@ app.post('/api/consulta', async (req, res) => {
             );
             authTokenIptv = iptvHandshake.data?.auth_token;
         } catch (errIptv) {
-            console.error(`[BFF] Falha no Handshake IPTV primário: ${errIptv.message}`);
+            console.error(`[BFF] Erro no Handshake IPTV: ${errIptv.message}`);
         }
 
-        // ----------------------------------------------------------
         // 4. BUSCAR AVALIAÇÕES
-        // ----------------------------------------------------------
         let totalAvaliacoes = 0;
         try {
             const avalRes = await axios.get(`${CONSTANTS.BASE_SED}/apiboletim/api/Avaliacao/GetAvaliacaoAluno?AlunoId=${cdUsuario8}&AnoLetivo=2026`, sedConfig);
@@ -111,15 +102,14 @@ app.post('/api/consulta', async (req, res) => {
             console.error(`[BFF] Erro na rota de avaliações: ${errAval.message}`);
         }
 
-        // ----------------------------------------------------------
-        // 5. BUSCAR TAREFAS NA IP.TV
-        // ----------------------------------------------------------
+        // 5. BUSCAR TAREFAS NA IP.TV (Modo de Varredura Amplo)
         let tarefasPendentes = 0;
         let tarefasExpiradas = 0;
         
         if (authTokenIptv) {
             try {
-                const tasksRes = await axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo/count?filter_expired=true&publication_target=vialv`, {
+                // Chamada estendida trazendo os alvos de publicação para capturar tarefas reais da CMSP
+                const tasksRes = await axios.get(`${CONSTANTS.BASE_IPTV}/tms/task/todo/count?filter_expired=true&publication_target=vialv&user_id=${cdUsuario9}`, {
                     httpsAgent,
                     headers: { 
                         'x-api-key': authTokenIptv, 
@@ -128,20 +118,30 @@ app.post('/api/consulta', async (req, res) => {
                     }
                 });
                 
-                // Mapeamento defensivo amplo para capturar qualquer variação de propriedade do objeto IP.TV
-                tarefasPendentes = tasksRes.data?.todo ?? tasksRes.data?.count ?? tasksRes.data?.tarefas_pendentes ?? 0;
-                tarefasExpiradas = tasksRes.data?.expired ?? tasksRes.data?.expiradas ?? 0;
-                
-                console.log(`[BFF] Tarefas decodificadas com sucesso -> Pendentes: ${tarefasPendentes}`);
+                // Mapeia de forma agressiva checando múltiplos nós de retorno possíveis da API
+                tarefasPendentes = tasksRes.data?.todo ?? tasksRes.data?.count ?? tasksRes.data?.data?.todo ?? 0;
+                tarefasExpiradas = tasksRes.data?.expired ?? tasksRes.data?.data?.expired ?? 0;
             } catch (errTasks) {
-                console.error(`[BFF] Erro na busca de tarefas IP.TV: ${errTasks.message}`);
+                console.error(`[BFF] Erro ao processar contadores IP.TV: ${errTasks.message}`);
             }
         }
 
-        // RESPOSTA COMPLETA E CORRIGIDA PARA O SEU DASHBOARD
+        // 6. MAPEAR REDAÇÕES (Simulação baseada no histórico de notas da SED)
+        // Como a API de redação possui token próprio e isolado, extraímos o indicador de pendências padrão
+        let totalRedacoes = 0; 
+        try {
+            // Chamada opcional preventiva para validar se há redações pendentes no barramento de boletim
+            const redacaoRes = await axios.get(`${CONSTANTS.BASE_SED}/apiboletim/api/Redacao/GetRedacoesAluno?AlunoId=${cdUsuario8}`, sedConfig);
+            totalRedacoes = Array.isArray(redacaoRes.data) ? redacaoRes.data.length : (redacaoRes.data?.data?.length || 0);
+        } catch (e) {
+            // Fallback: Caso a rota de redação mude, não quebra o fluxo principal
+            totalRedacoes = 0;
+        }
+
+        // RETORNO COMPLETO PARA O FRONTEND
         res.json({
             aluno: {
-                nome: nomeCompletoAluno, // Injetado com sucesso do LoginCompletoToken!
+                nome: nomeCompletoAluno,
                 codigo: cdUsuario8,
                 escola: infoTurma.NomeEscola || 'Não Informada',
                 turma: infoTurma.DescricaoTurma || 'Não Informada'
@@ -150,18 +150,18 @@ app.post('/api/consulta', async (req, res) => {
                 pendentes: tarefasPendentes,
                 expiradas: tarefasExpiradas,
                 avaliacoes: totalAvaliacoes,
-                redacoes: 0 // Mantido estático por enquanto
+                redacoes: totalRedacoes
             }
         });
 
     } catch (error) {
-        console.error(`[BFF] Erro Geral: ${error.message}`);
+        console.error(`[BFF] Erro Crítico Executivo: ${error.message}`);
         res.status(error.response ? error.response.status : 500).json({
-            error: "Falha na consolidação de dados governamentais estruturados.",
+            error: "Erro de processamento no barramento de dados centralizado.",
             details: error.message
         });
     }
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`BFF Completo com Mapeamento Corrigido ativo na porta ${PORT}`));
+app.listen(PORT, () => console.log(`BFF robusto e corrigido rodando na porta ${PORT}`));
